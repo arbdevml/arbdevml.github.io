@@ -1,155 +1,487 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <script src="https://cdn.jsdelivr.net/gh/msqr1/Vosklet@1.2.1/Examples/Vosklet.js" async defer></script>
   <script>
-    // Global variable to store console output
+    // console output capture
     let consoleOutput = "";
-    
-    // Override console.log to capture output
+
     const originalLog = console.log;
     const originalInfo = console.info;
     const originalWarn = console.warn;
     const originalError = console.error;
     const originalDebug = console.debug;
-    
+
     function formatMessage(level, ...args) {
       const timestamp = new Date().toISOString();
-      const message = args.join(' ') + '\n';
-      return `[${timestamp}] ${level}: ${message}`;
+      return `[${timestamp}] ${level}: ${args.join(' ')}\n`;
     }
-    
+
     console.log = function(...args) {
       const formattedMessage = formatMessage('LOG', ...args);
       consoleOutput += formattedMessage;
       updateConsoleDisplay();
       originalLog.apply(console, args);
     };
-    
+
     console.info = function(...args) {
       const formattedMessage = formatMessage('INFO', ...args);
       consoleOutput += formattedMessage;
       updateConsoleDisplay();
       originalInfo.apply(console, args);
     };
-    
+
     console.warn = function(...args) {
       const formattedMessage = formatMessage('WARN', ...args);
       consoleOutput += formattedMessage;
       updateConsoleDisplay();
       originalWarn.apply(console, args);
     };
-    
+
     console.error = function(...args) {
       const formattedMessage = formatMessage('ERROR', ...args);
       consoleOutput += formattedMessage;
       updateConsoleDisplay();
       originalError.apply(console, args);
     };
-    
+
     console.debug = function(...args) {
       const formattedMessage = formatMessage('DEBUG', ...args);
       consoleOutput += formattedMessage;
       updateConsoleDisplay();
       originalDebug.apply(console, args);
     };
-    
+
     function updateConsoleDisplay() {
       const outputDiv = document.getElementById('console-output');
       if (outputDiv) {
         outputDiv.textContent = consoleOutput;
-        // Auto-scroll to bottom
         outputDiv.scrollTop = outputDiv.scrollHeight;
       }
     }
-    
-    async function start() {
-      // Clear previous output
-      consoleOutput = "";
-      updateConsoleDisplay();
-      
+
+    //  global state tracking
+    let audioContext, micNode, recognizer, transferer, module;
+    let isFirstLoad = true;
+    let currentRetryCount = 0;
+    const maxRetries = 3;
+
+    // Timeout utility function
+    function withTimeout(promise, timeoutMs = 10000) {
+      return Promise.race([
+        promise,
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error(`Operation timed out after ${timeoutMs}ms`)), timeoutMs)
+        )
+      ]);
+    }
+
+    // Retry utility function
+    async function withRetry(operation, maxRetries = 3, delay = 1000) {
+      let lastError;
+
+      for (let i = 0; i <= maxRetries; i++) {
+        try {
+          return await operation();
+        } catch (error) {
+          lastError = error;
+          console.warn(`Attempt ${i + 1} failed:`, error.message);
+
+          if (i < maxRetries) {
+            console.info(`Retrying in ${delay}ms...`);
+            await new Promise(resolve => setTimeout(resolve, delay));
+            delay *= 2; // Exponential backoff
+          }
+        }
+      }
+
+      throw lastError;
+    }
+
+    // Progress indicator utility
+    function updateProgress(message, progress = 0) {
+      const progressBar = document.getElementById('progress-bar');
+      if (progressBar) {
+        progressBar.textContent = `${message} (${Math.round(progress * 100)}%)`;
+      }
+      console.log(`${message} - ${Math.round(progress * 100)}%`);
+    }
+
+    // cleanup function with better error handling
+    function cleanup() {
       try {
-        console.info("Starting X-vector speaker recognition system...");
-        
-        // Create audio context
-        console.log("Creating AudioContext...");
-        let ctx = new AudioContext({ sinkId: { type: "none" } });
-        console.log("AudioContext created successfully");
+        // Stop audio context if exists
+        if (audioContext && audioContext.state !== 'closed') {
+          audioContext.close();
+          console.log("AudioContext closed");
+        }
+        audioContext = null;
 
-        // Setup microphone  
-        console.log("Requesting microphone access...");
-        let micNode = ctx.createMediaStreamSource(await navigator.mediaDevices.getUserMedia({
-          video: false,
-          audio: {
-            echoCancellation: true,
-            noiseSuppression: true,
-            channelCount: 1
-          },
-        }));
-        console.log("Microphone access granted and source created");
+        // Disconnect microphone node if exists
+        if (micNode) {
+          micNode.disconnect();
+          console.log("Microphone disconnected");
+          micNode = null;
+        }
 
-        // Load Vosklet module
-        console.log("Loading Vosklet module...");
-        let module = await loadVosklet();
-        console.log("Vosklet module loaded successfully");
-        
-        // Set log level to see more details (optional)
-        module.setLogLevel(1);
-        console.info("Log level set to verbose");
+        // Stop recognizer if exists
+        if (recognizer) {
+          recognizer.removeEventListener("result", () => {});
+          recognizer.removeEventListener("partialResult", () => {});
+          recognizer = null;
+          console.log("Recognizer cleaned up");
+        }
 
-        // Load base model
-        console.log("Loading base model: vosk-model-small-en-us-0.15.tar.gz");
-        let model = await module.createModel(
-          "https://ccoreilly.github.io/vosk-browser/models/vosk-model-small-en-us-0.15.tar.gz", 
-          "English", 
-          "vosk-model-small-en-us-0.15"
-        );
-        console.log("Base model loaded successfully");
+        // Disconnect transferer if exists
+        if (transferer) {
+          transferer.port.onmessage = null;
+          transferer = null;
+          console.log("Transferer cleaned up");
+        }
 
-        // Load speaker model
-        console.log("Loading speaker model: vosk-model-spk-0.4.tar.gz");
-        let spkModel = await module.createSpkModel(
-          "vosk-model-spk-0.4.tar.gz", 
-          "Speaker", 
-          "vosk-model-spk-0.4"
-        );
-        console.log("Speaker model loaded successfully");
+        // Remove Vosklet script
+        const existingScript = document.querySelector('script[src*="Vosklet.js"]');
+        if (existingScript) {
+          existingScript.remove();
+          console.log("Vosklet script removed");
+        }
 
-        // Create recognizer with speaker model
-        console.log("Creating recognizer with speaker model...");
-        let recognizer = await module.createRecognizerWithSpkModel(model, spkModel, ctx.sampleRate);
-        console.log("Recognizer created successfully");
+        // Clear references
+        module = null;
 
-        // Listen for results
-        recognizer.addEventListener("result", ev => {
-          console.log("Final recognition result:", ev.detail);
-        });
-        
-        recognizer.addEventListener("partialResult", ev => {
-          console.log("Partial recognition result:", ev.detail);
-        });
+        // Optionally, check if the function still exists and delete it from window
+        if (typeof window.loadVosklet !== 'undefined') {
+          delete window.loadVosklet;
+          console.log("loadVosklet removed from global scope");
+        }
 
-        // Create transferer node
-        console.log("Creating transferer node...");
-        let transferer = await module.createTransferer(ctx, 128 * 150);
-        console.log("Transferer node created successfully");
+        // Clear console display
+        consoleOutput = "";
+        updateConsoleDisplay();
 
-        // Connect audio data to recognizer
-        console.log("Connecting microphone to recognizer...");
-        transferer.port.onmessage = ev => recognizer.acceptWaveform(ev.data);
-        micNode.connect(transferer);
-        
-        console.info("X-vector speaker recognition started successfully!");
-        console.log("System is now listening for speech input...");
-        
+        // Clear all client-side storage mechanisms
+        try {
+          // Clear localStorage
+          if (typeof(Storage) !== "undefined") {
+            localStorage.clear();
+            console.log("localStorage cleared");
+          }
+
+          // Clear sessionStorage
+          if (typeof(Storage) !== "undefined") {
+            sessionStorage.clear();
+            console.log("sessionStorage cleared");
+          }
+
+          // Clear cookies
+          document.cookie.split(";").forEach(function(c) {
+            document.cookie = c.replace(/^ +/, "").replace(/=.*/, "=;expires=" + new Date().toUTCString() + ";path=/");
+          });
+          console.log("Cookies cleared");
+
+          // Clear all service workers (if any)
+          if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.getRegistrations().then(function(registrations) {
+              for(let registration of registrations) {
+                registration.unregister();
+              }
+            });
+            console.log("Service workers unregistered");
+          }
+
+          // Clear cache storage (for modern browsers)
+          if ('caches' in window) {
+            caches.keys().then(names => {
+              names.forEach(name => {
+                caches.delete(name);
+              });
+            });
+            console.log("Cache storage cleared");
+          }
+
+          // Clear IndexedDB databases
+          if ('indexedDB' in window) {
+            const dbs = [];
+            const req = indexedDB.databases();
+            req.onsuccess = function() {
+              const databases = req.result;
+              databases.forEach(db => {
+                try {
+                  if (db.name) {
+                    indexedDB.deleteDatabase(db.name);
+                    console.log(`IndexedDB database ${db.name} deleted`);
+                  }
+                } catch (e) {
+                  console.warn("Could not delete database:", db.name, e);
+                }
+              });
+            };
+          }
+
+        } catch (error) {
+          console.error("Error during cleanup of storage mechanisms:", error);
+        }
+
+        // Only perform hard refresh on subsequent loads, not the first load
+        if (!isFirstLoad) {
+          // Hard refresh the browser page (Ctrl+F5 equivalent)
+          window.location.reload(true);
+        } else {
+          // Mark that we've loaded at least once now
+          isFirstLoad = false;
+        }
       } catch (error) {
-        console.error("Fatal error in start function:", error);
-        console.error("Error name:", error.name);
-        console.error("Error message:", error.message);
-        console.error("Error stack:", error.stack);
+        console.error("Fatal error during cleanup:", error);
       }
     }
-    
+
+    // start function with all improvements
+    async function start() {
+      try {
+        console.info("Starting X-vector speaker recognition system...");
+
+        // Clear previous state and storage
+        cleanup();
+
+        // Reset retry counter
+        currentRetryCount = 0;
+
+        // Get the selected version URL
+        const selectElement = document.querySelector('.versions');
+        const selectedUrl = String(selectElement.value) + '/Vosklet.js';
+
+        // Clear previous output
+        consoleOutput = "";
+        updateConsoleDisplay();
+
+        // Show progress indicator
+        const progressBar = document.getElementById('progress-bar');
+        if (progressBar) {
+          progressBar.textContent = "Initializing system...";
+        }
+
+        try {
+          // Load Vosklet.js with timeout and retry
+          console.log("Loading Vosklet.js from:", selectedUrl);
+          updateProgress("Loading Vosklet library", 0.1);
+
+          const scriptLoadPromise = new Promise((resolve, reject) => {
+            const script = document.createElement('script');
+            script.src = selectedUrl;
+            script.async = true;
+            script.defer = true;
+
+            script.onload = () => {
+              console.log("Vosklet.js loaded successfully");
+              resolve();
+            };
+
+            script.onerror = (error) => {
+              console.error("Failed to load Vosklet.js:", error);
+              reject(new Error(`Failed to load Vosklet.js from ${selectedUrl}`));
+            };
+
+            document.head.appendChild(script);
+          });
+
+          await withTimeout(
+            withRetry(() => scriptLoadPromise, maxRetries),
+            15000
+          );
+          updateProgress("Vosklet library loaded", 0.2);
+
+          // Create audio context with timeout
+          console.log("Creating AudioContext...");
+          updateProgress("Setting up audio context", 0.3);
+
+          const ctxPromise = new Promise((resolve, reject) => {
+            try {
+              audioContext = new AudioContext({ sinkId: { type: "none" } });
+              console.log("AudioContext created successfully");
+              resolve(audioContext);
+            } catch (error) {
+              console.error("Failed to create AudioContext:", error);
+              reject(error);
+            }
+          });
+
+          audioContext = await withTimeout(ctxPromise, 5000);
+          updateProgress("Audio context ready", 0.4);
+
+          // Setup microphone with timeout and retry
+          console.log("Requesting microphone access...");
+          updateProgress("Requesting microphone access", 0.5);
+
+          const micPromise = new Promise((resolve, reject) => {
+            navigator.mediaDevices.getUserMedia({
+              video: false,
+              audio: {
+                echoCancellation: true,
+                noiseSuppression: true,
+                channelCount: 1
+              },
+            }).then(stream => {
+              console.log("Microphone access granted and source created");
+              micNode = audioContext.createMediaStreamSource(stream);
+              resolve(micNode);
+            }).catch(error => {
+              console.error("Microphone access denied:", error);
+              reject(error);
+            });
+          });
+
+          micNode = await withTimeout(
+            withRetry(() => micPromise, maxRetries),
+            10000
+          );
+          updateProgress("Microphone ready", 0.6);
+
+          // Load Vosklet module with timeout and retry
+          console.log("Loading Vosklet module...");
+          updateProgress("Loading Vosklet module", 0.7);
+
+          const moduleLoadPromise = new Promise((resolve, reject) => {
+            try {
+              if (typeof window.loadVosklet === 'undefined') {
+                throw new Error("loadVosklet function not available");
+              }
+              resolve(window.loadVosklet());
+            } catch (error) {
+              reject(error);
+            }
+          });
+
+          module = await withTimeout(
+            withRetry(() => moduleLoadPromise, maxRetries),
+            20000
+          );
+          console.log("Vosklet module loaded successfully");
+          updateProgress("Module loaded", 0.8);
+
+          // Set log level to see more details (optional)
+          module.setLogLevel(5);
+          console.info("Log level set to verbose");
+
+          // Load base model with progress tracking and timeout
+          console.log("Loading base model: https://ccoreilly.github.io/vosk-browser/models/vosk-model-small-en-us-0.15.tar.gz");
+          updateProgress("Loading base speech recognition model", 0.9);
+
+          const baseModelPromise = new Promise((resolve, reject) => {
+            try {
+              const model = module.createModel(
+                "https://ccoreilly.github.io/vosk-browser/models/vosk-model-small-en-us-0.15.tar.gz",
+                "English",
+                "vosk-model-small-en-us-0.15"
+              );
+              resolve(model);
+            } catch (error) {
+              reject(error);
+            }
+          });
+
+          const baseModel = await withTimeout(
+            withRetry(() => baseModelPromise, maxRetries),
+            30000
+          );
+          console.log("Base model loaded successfully");
+          updateProgress("Base model loaded", 0.95);
+
+          // Load speaker model with timeout and retry
+          console.log("Loading speaker model: https://arbdevml.github.io/x-vector/vosk-model-spk-0.4.tar.gz");
+          updateProgress("Loading speaker recognition model", 0.96);
+
+          const spkModelPromise = new Promise((resolve, reject) => {
+            try {
+              const spkModel = module.createSpkModel(
+                "https://arbdevml.github.io/x-vector/vosk-model-spk-0.4.tar.gz",
+                "Speaker",
+                "vosk-model-spk-0.4"
+              );
+              resolve(spkModel);
+            } catch (error) {
+              reject(error);
+            }
+          });
+
+          const spkModel = await withTimeout(
+            withRetry(() => spkModelPromise, maxRetries),
+            30000
+          );
+          console.log("Speaker model loaded successfully");
+          updateProgress("Speaker model loaded", 0.97);
+
+          // Create recognizer with speaker model
+          console.log("Creating recognizer with speaker model...");
+          const recognizerPromise = new Promise((resolve, reject) => {
+            try {
+              const rec = module.createRecognizerWithSpkModel(baseModel, spkModel, audioContext.sampleRate);
+              resolve(rec);
+            } catch (error) {
+              reject(error);
+            }
+          });
+
+          recognizer = await withTimeout(recognizerPromise, 10000);
+          console.log("Recognizer created successfully");
+          updateProgress("Recognizer created", 0.98);
+
+          // Listen for results
+          recognizer.addEventListener("result", ev => {
+            console.log("Final recognition result:", ev.detail);
+          });
+
+          recognizer.addEventListener("partialResult", ev => {
+            console.log("Partial recognition result:", ev.detail);
+          });
+
+          // Create transferer node with timeout
+          console.log("Creating transferer node...");
+          const transfererPromise = new Promise((resolve, reject) => {
+            try {
+              const tr = module.createTransferer(audioContext, 128 * 150);
+              resolve(tr);
+            } catch (error) {
+              reject(error);
+            }
+          });
+
+          transferer = await withTimeout(transfererPromise, 10000);
+          console.log("Transferer node created successfully");
+          updateProgress("Transferer ready", 0.99);
+
+          // Connect audio data to recognizer
+          console.log("Connecting microphone to recognizer...");
+          transferer.port.onmessage = ev => recognizer.acceptWaveform(ev.data);
+          micNode.connect(transferer);
+
+          console.info("X-vector speaker recognition started successfully!");
+          console.log("System is now listening for speech input...");
+          updateProgress("System ready", 1.0);
+
+          // Show completion message
+          setTimeout(() => {
+            const status = document.getElementById('status');
+            if (status) {
+              status.textContent = "System ready - Listening for speech input";
+            }
+          }, 1000);
+
+        } catch (error) {
+          console.error("Fatal error in start function:", error);
+          console.error("Error name:", error.name);
+          console.error("Error message:", error.message);
+          console.error("Error stack:", error.stack);
+
+          // Show error status
+          const status = document.getElementById('status');
+          if (status) {
+            status.textContent = "Error occurred - Check console for details";
+          }
+        }
+      } catch (error) {
+        console.error("Unexpected error in start function:", error);
+      }
+    }
+
     // Add a function to clear the console
     function clearConsole() {
       consoleOutput = "";
@@ -199,8 +531,8 @@
     }
 
     button {
-      display: block;
-      margin: 20px auto;
+      display: inline-block;
+      margin: 10px 5px;
       padding: 10px 20px;
       font-size: 16px;
     }
@@ -217,7 +549,6 @@
       padding: 10px 16px;
       cursor: pointer;
       border-radius: 4px;
-      margin: 0 5px;
     }
 
     .control-btn:hover {
@@ -231,7 +562,6 @@
       padding: 10px 16px;
       cursor: pointer;
       border-radius: 4px;
-      margin: 0 5px;
     }
 
     .clear-btn:hover {
@@ -245,19 +575,70 @@
       padding: 10px 16px;
       cursor: pointer;
       border-radius: 4px;
-      margin: 0 5px;
     }
 
     #copy-btn:hover {
       background-color: #0b7dda;
     }
+
+    .versions {
+      margin: 10px 0;
+      padding: 8px;
+      font-size: 16px;
+      border-radius: 4px;
+      border: 1px solid #ccc;
+    }
+
+    #progress-bar {
+      text-align: center;
+      margin: 10px 0;
+      padding: 10px;
+      background-color: #e8f5e8;
+      border-radius: 4px;
+      font-weight: bold;
+    }
+
+    #status {
+      text-align: center;
+      margin: 10px 0;
+      padding: 10px;
+      background-color: #fff3cd;
+      border-radius: 4px;
+      color: #856404;
+      font-weight: bold;
+    }
   </style>
 </head>
 <body>
   <div class="controls">
+    <select class="versions select-css">
+      <option value="https://raw.githubusercontent.com/msqr1/Vosklet/refs/heads/main">msqr1/Vosklet@master</option>
+      <option value="https://cdn.jsdelivr.net/gh/msqr1/Vosklet@1.2.1" selected>msqr1/Vosklet@1.2.1</option>
+      <option value="https://cdn.jsdelivr.net/gh/msqr1/Vosklet@1.2.0">msqr1/Vosklet@1.2.0</option>
+      <option value="https://cdn.jsdelivr.net/gh/msqr1/Vosklet@1.1.5">msqr1/Vosklet@1.1.5</option>
+      <option value="https://cdn.jsdelivr.net/gh/msqr1/Vosklet@1.1.4">msqr1/Vosklet@1.1.4</option>
+      <option value="https://cdn.jsdelivr.net/gh/msqr1/Vosklet@1.1.3">msqr1/Vosklet@1.1.3</option>
+      <option value="https://cdn.jsdelivr.net/gh/msqr1/Vosklet@1.1.2">msqr1/Vosklet@1.1.2</option>
+      <option value="https://cdn.jsdelivr.net/gh/msqr1/Vosklet@1.1.1">msqr1/Vosklet@1.1.1</option>
+      <option value="https://cdn.jsdelivr.net/gh/msqr1/Vosklet@1.1.0">msqr1/Vosklet@1.1.0</option>
+      <option value="https://cdn.jsdelivr.net/gh/msqr1/Vosklet@1.0.4">msqr1/Vosklet@1.0.4</option>
+      <option value="https://cdn.jsdelivr.net/gh/msqr1/Vosklet@1.0.3">msqr1/Vosklet@1.0.3</option>
+      <option value="https://cdn.jsdelivr.net/gh/msqr1/Vosklet@1.0.2">msqr1/Vosklet@1.0.2</option>
+      <option value="https://cdn.jsdelivr.net/gh/msqr1/Vosklet@1.0.1">msqr1/Vosklet@1.0.1</option>
+      <option value="https://cdn.jsdelivr.net/gh/msqr1/Vosklet@1.0.0">msqr1/Vosklet@1.0.0</option>
+    </select>
+
     <button class="control-btn" onclick="start()">Start Speaker Recognition</button>
     <button class="clear-btn" onclick="clearConsole()">Clear Console</button>
     <button id="copy-btn" class="control-btn" onclick="copyToClipboard()">Copy to Clipboard</button>
+  </div>
+
+  <div id="progress-bar">
+    System not initialized
+  </div>
+
+  <div id="status">
+    Ready to start system
   </div>
 
   <div id="console-output">
@@ -265,4 +646,3 @@
   </div>
 </body>
 </html>
-
