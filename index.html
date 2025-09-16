@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <script src="https://cdn.jsdelivr.net/gh/msqr1/Vosklet@1.2.1/Examples/Vosklet.js" async defer></script>
+  <script>
+    // Global variable to store console output
+    let consoleOutput = "";
+    
+    // Override console.log to capture output
+    const originalLog = console.log;
+    const originalInfo = console.info;
+    const originalWarn = console.warn;
+    const originalError = console.error;
+    const originalDebug = console.debug;
+    
+    function formatMessage(level, ...args) {
+      const timestamp = new Date().toISOString();
+      const message = args.join(' ') + '\n';
+      return `[${timestamp}] ${level}: ${message}`;
+    }
+    
+    console.log = function(...args) {
+      const formattedMessage = formatMessage('LOG', ...args);
+      consoleOutput += formattedMessage;
+      updateConsoleDisplay();
+      originalLog.apply(console, args);
+    };
+    
+    console.info = function(...args) {
+      const formattedMessage = formatMessage('INFO', ...args);
+      consoleOutput += formattedMessage;
+      updateConsoleDisplay();
+      originalInfo.apply(console, args);
+    };
+    
+    console.warn = function(...args) {
+      const formattedMessage = formatMessage('WARN', ...args);
+      consoleOutput += formattedMessage;
+      updateConsoleDisplay();
+      originalWarn.apply(console, args);
+    };
+    
+    console.error = function(...args) {
+      const formattedMessage = formatMessage('ERROR', ...args);
+      consoleOutput += formattedMessage;
+      updateConsoleDisplay();
+      originalError.apply(console, args);
+    };
+    
+    console.debug = function(...args) {
+      const formattedMessage = formatMessage('DEBUG', ...args);
+      consoleOutput += formattedMessage;
+      updateConsoleDisplay();
+      originalDebug.apply(console, args);
+    };
+    
+    function updateConsoleDisplay() {
+      const outputDiv = document.getElementById('console-output');
+      if (outputDiv) {
+        outputDiv.textContent = consoleOutput;
+        // Auto-scroll to bottom
+        outputDiv.scrollTop = outputDiv.scrollHeight;
+      }
+    }
+    
+    async function start() {
+      // Clear previous output
+      consoleOutput = "";
+      updateConsoleDisplay();
+      
+      try {
+        console.info("Starting X-vector speaker recognition system...");
+        
+        // Create audio context
+        console.log("Creating AudioContext...");
+        let ctx = new AudioContext({ sinkId: { type: "none" } });
+        console.log("AudioContext created successfully");
+
+        // Setup microphone  
+        console.log("Requesting microphone access...");
+        let micNode = ctx.createMediaStreamSource(await navigator.mediaDevices.getUserMedia({
+          video: false,
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            channelCount: 1
+          },
+        }));
+        console.log("Microphone access granted and source created");
+
+        // Load Vosklet module
+        console.log("Loading Vosklet module...");
+        let module = await loadVosklet();
+        console.log("Vosklet module loaded successfully");
+        
+        // Set log level to see more details (optional)
+        module.setLogLevel(1);
+        console.info("Log level set to verbose");
+
+        // Load base model
+        console.log("Loading base model: vosk-model-small-en-us-0.15.tar.gz");
+        let model = await module.createModel(
+          "https://ccoreilly.github.io/vosk-browser/models/vosk-model-small-en-us-0.15.tar.gz", 
+          "English", 
+          "vosk-model-small-en-us-0.15"
+        );
+        console.log("Base model loaded successfully");
+
+        // Load speaker model
+        console.log("Loading speaker model: vosk-model-spk-0.4.tar.gz");
+        let spkModel = await module.createSpkModel(
+          "vosk-model-spk-0.4.tar.gz", 
+          "Speaker", 
+          "vosk-model-spk-0.4"
+        );
+        console.log("Speaker model loaded successfully");
+
+        // Create recognizer with speaker model
+        console.log("Creating recognizer with speaker model...");
+        let recognizer = await module.createRecognizerWithSpkModel(model, spkModel, ctx.sampleRate);
+        console.log("Recognizer created successfully");
+
+        // Listen for results
+        recognizer.addEventListener("result", ev => {
+          console.log("Final recognition result:", ev.detail);
+        });
+        
+        recognizer.addEventListener("partialResult", ev => {
+          console.log("Partial recognition result:", ev.detail);
+        });
+
+        // Create transferer node
+        console.log("Creating transferer node...");
+        let transferer = await module.createTransferer(ctx, 128 * 150);
+        console.log("Transferer node created successfully");
+
+        // Connect audio data to recognizer
+        console.log("Connecting microphone to recognizer...");
+        transferer.port.onmessage = ev => recognizer.acceptWaveform(ev.data);
+        micNode.connect(transferer);
+        
+        console.info("X-vector speaker recognition started successfully!");
+        console.log("System is now listening for speech input...");
+        
+      } catch (error) {
+        console.error("Fatal error in start function:", error);
+        console.error("Error name:", error.name);
+        console.error("Error message:", error.message);
+        console.error("Error stack:", error.stack);
+      }
+    }
+    
+    // Add a function to clear the console
+    function clearConsole() {
+      consoleOutput = "";
+      updateConsoleDisplay();
+    }
+
+    // Add copy to clipboard functionality
+    function copyToClipboard() {
+      const outputDiv = document.getElementById('console-output');
+      if (outputDiv) {
+        const text = outputDiv.textContent;
+        navigator.clipboard.writeText(text).then(() => {
+          console.log("Console output copied to clipboard!");
+          // Show temporary feedback
+          const originalText = document.getElementById('copy-btn').textContent;
+          document.getElementById('copy-btn').textContent = "Copied!";
+          setTimeout(() => {
+            document.getElementById('copy-btn').textContent = originalText;
+          }, 2000);
+        }).catch(err => {
+          console.error("Failed to copy: ", err);
+        });
+      }
+    }
+
+    // Add scroll to bottom functionality
+    function scrollToBottom() {
+      const outputDiv = document.getElementById('console-output');
+      if (outputDiv) {
+        outputDiv.scrollTop = outputDiv.scrollHeight;
+      }
+    }
+  </script>
+
+  <style>
+    #console-output {
+      width: 90%;
+      height: 400px;
+      border: 1px solid #ccc;
+      padding: 10px;
+      margin: 20px auto;
+      overflow-y: auto;
+      background-color: #f5f5f5;
+      font-family: monospace;
+      white-space: pre-wrap;
+      word-wrap: break-word;
+    }
+
+    button {
+      display: block;
+      margin: 20px auto;
+      padding: 10px 20px;
+      font-size: 16px;
+    }
+
+    .controls {
+      text-align: center;
+      margin-bottom: 10px;
+    }
+
+    .control-btn {
+      background-color: #4CAF50;
+      color: white;
+      border: none;
+      padding: 10px 16px;
+      cursor: pointer;
+      border-radius: 4px;
+      margin: 0 5px;
+    }
+
+    .control-btn:hover {
+      background-color: #45a049;
+    }
+
+    .clear-btn {
+      background-color: #ff6b6b;
+      color: white;
+      border: none;
+      padding: 10px 16px;
+      cursor: pointer;
+      border-radius: 4px;
+      margin: 0 5px;
+    }
+
+    .clear-btn:hover {
+      background-color: #ff5252;
+    }
+
+    #copy-btn {
+      background-color: #2196F3;
+      color: white;
+      border: none;
+      padding: 10px 16px;
+      cursor: pointer;
+      border-radius: 4px;
+      margin: 0 5px;
+    }
+
+    #copy-btn:hover {
+      background-color: #0b7dda;
+    }
+  </style>
+</head>
+<body>
+  <div class="controls">
+    <button class="control-btn" onclick="start()">Start Speaker Recognition</button>
+    <button class="clear-btn" onclick="clearConsole()">Clear Console</button>
+    <button id="copy-btn" class="control-btn" onclick="copyToClipboard()">Copy to Clipboard</button>
+  </div>
+
+  <div id="console-output">
+    Console output will appear here...
+  </div>
+</body>
+</html>
+
