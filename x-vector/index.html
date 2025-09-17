@@ -1,8 +1,10 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <meta http-equiv="Cross-Origin-Embedder-Policy" content="require-corp">
-  <meta http-equiv="Cross-Origin-Opener-Policy" content="same-origin">
+<title>X-vector (voice fingerprint) online</title>
+<meta name="description" content="X-vector speaker recognition system for voice fingerprint identification">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/github-fork-ribbon-css/0.2.3/gh-fork-ribbon.min.css" />
+<script src="Vosklet.js" async defer></script>
   <script>
     // console output capture
     let consoleOutput = "";
@@ -12,6 +14,72 @@
     const originalWarn = console.warn;
     const originalError = console.error;
     const originalDebug = console.debug;
+
+    // Add pause/resume functionality
+    let isPaused = false;
+    let isStarted = false;
+
+    function toggleStartPause() {
+      const startBtn = document.getElementById('start-btn');
+
+      if (!isStarted) {
+        // Start the system
+        isStarted = true;
+        isPaused = false;
+        if (startBtn) {
+          startBtn.textContent = "Pause";
+        }
+        start();
+      } else if (!isPaused) {
+        // Pause the system
+        isPaused = true;
+        if (startBtn) {
+          startBtn.textContent = "Resume";
+        }
+
+        // Disconnect audio processing
+        if (transferer && micNode) {
+          try {
+            micNode.disconnect(transferer);
+            console.log("System paused - Audio processing stopped");
+          } catch (error) {
+            console.warn("Error during pause:", error);
+          }
+        }
+
+        const status = document.getElementById('status');
+        if (status) {
+          status.textContent = "System paused";
+          status.style.backgroundColor = "#fff3cd";
+        }
+
+        console.info("System paused");
+      } else {
+        // Resume the system
+        isPaused = false;
+        if (startBtn) {
+          startBtn.textContent = "Pause";
+        }
+
+        // Reconnect audio processing
+        if (transferer && micNode && recognizer) {
+          try {
+            micNode.connect(transferer);
+            console.log("System resumed - Audio processing restarted");
+          } catch (error) {
+            console.warn("Error during resume:", error);
+          }
+        }
+
+        const status = document.getElementById('status');
+        if (status) {
+          status.textContent = "System ready - Listening for speech input";
+          status.style.backgroundColor = "#e8f5e8";
+        }
+
+        console.info("System resumed");
+      }
+    }
 
     function formatMessage(level, ...args) {
       const timestamp = new Date().toISOString();
@@ -108,148 +176,13 @@
       console.log(`${message} - ${Math.round(progress * 100)}%`);
     }
 
-    // cleanup function with better error handling
-    function cleanup() {
-      try {
-        // Stop audio context if exists
-        if (audioContext && audioContext.state !== 'closed') {
-          audioContext.close();
-          console.log("AudioContext closed");
-        }
-        audioContext = null;
-
-        // Disconnect microphone node if exists
-        if (micNode) {
-          micNode.disconnect();
-          console.log("Microphone disconnected");
-          micNode = null;
-        }
-
-        // Stop recognizer if exists
-        if (recognizer) {
-          recognizer.removeEventListener("result", () => {});
-          recognizer.removeEventListener("partialResult", () => {});
-          recognizer = null;
-          console.log("Recognizer cleaned up");
-        }
-
-        // Disconnect transferer if exists
-        if (transferer) {
-          transferer.port.onmessage = null;
-          transferer = null;
-          console.log("Transferer cleaned up");
-        }
-
-        // Remove Vosklet script
-        const existingScript = document.querySelector('script[src*="Vosklet.js"]');
-        if (existingScript) {
-          existingScript.remove();
-          console.log("Vosklet script removed");
-        }
-
-        // Clear references
-        module = null;
-
-        // Optionally, check if the function still exists and delete it from window
-        if (typeof window.loadVosklet !== 'undefined') {
-          delete window.loadVosklet;
-          console.log("loadVosklet removed from global scope");
-        }
-
-        // Clear console display
-        consoleOutput = "";
-        updateConsoleDisplay();
-
-        // Clear all client-side storage mechanisms
-        try {
-          // Clear localStorage
-          if (typeof(Storage) !== "undefined") {
-            localStorage.clear();
-            console.log("localStorage cleared");
-          }
-
-          // Clear sessionStorage
-          if (typeof(Storage) !== "undefined") {
-            sessionStorage.clear();
-            console.log("sessionStorage cleared");
-          }
-
-          // Clear cookies
-          document.cookie.split(";").forEach(function(c) {
-            document.cookie = c.replace(/^ +/, "").replace(/=.*/, "=;expires=" + new Date().toUTCString() + ";path=/");
-          });
-          console.log("Cookies cleared");
-
-          // Clear all service workers (if any)
-          if ('serviceWorker' in navigator) {
-            navigator.serviceWorker.getRegistrations().then(function(registrations) {
-              for(let registration of registrations) {
-                registration.unregister();
-              }
-            });
-            console.log("Service workers unregistered");
-          }
-
-          // Clear cache storage (for modern browsers)
-          if ('caches' in window) {
-            caches.keys().then(names => {
-              names.forEach(name => {
-                caches.delete(name);
-              });
-            });
-            console.log("Cache storage cleared");
-          }
-
-          // Clear IndexedDB databases
-          if ('indexedDB' in window) {
-            const dbs = [];
-            const req = indexedDB.databases();
-            req.onsuccess = function() {
-              const databases = req.result;
-              databases.forEach(db => {
-                try {
-                  if (db.name) {
-                    indexedDB.deleteDatabase(db.name);
-                    console.log(`IndexedDB database ${db.name} deleted`);
-                  }
-                } catch (e) {
-                  console.warn("Could not delete database:", db.name, e);
-                }
-              });
-            };
-          }
-
-        } catch (error) {
-          console.error("Error during cleanup of storage mechanisms:", error);
-        }
-
-        // Only perform hard refresh on subsequent loads, not the first load
-        if (!isFirstLoad) {
-          // Hard refresh the browser page (Ctrl+F5 equivalent)
-          window.location.reload(true);
-        } else {
-          // Mark that we've loaded at least once now
-          isFirstLoad = false;
-        }
-      } catch (error) {
-        console.error("Fatal error during cleanup:", error);
-      }
-    }
-
     // start function with all improvements
     async function start() {
       try {
         console.info("Starting X-vector speaker recognition system...");
 
-        // Clear previous state and storage
-        cleanup();
-
         // Reset retry counter
         currentRetryCount = 0;
-
-        // Get the selected version URL
-        const selectElement = document.querySelector('.versions');
-        const selectedUrl = String(selectElement.value) + '/Vosklet.js';
 
         // Clear previous output
         consoleOutput = "";
@@ -262,33 +195,8 @@
         }
 
         try {
-          // Load Vosklet.js with timeout and retry
-          console.log("Loading Vosklet.js from:", selectedUrl);
           updateProgress("Loading Vosklet library", 0.1);
 
-          const scriptLoadPromise = new Promise((resolve, reject) => {
-            const script = document.createElement('script');
-            script.src = selectedUrl;
-            script.async = true;
-            script.defer = true;
-
-            script.onload = () => {
-              console.log("Vosklet.js loaded successfully");
-              resolve();
-            };
-
-            script.onerror = (error) => {
-              console.error("Failed to load Vosklet.js:", error);
-              reject(new Error(`Failed to load Vosklet.js from ${selectedUrl}`));
-            };
-
-            document.head.appendChild(script);
-          });
-
-          await withTimeout(
-            withRetry(() => scriptLoadPromise, maxRetries),
-            15000
-          );
           updateProgress("Vosklet library loaded", 0.2);
 
           // Create audio context with timeout
@@ -364,13 +272,13 @@
           console.info("Log level set to verbose");
 
           // Load base model with progress tracking and timeout
-          console.log("Loading base model: https://ccoreilly.github.io/vosk-browser/models/vosk-model-small-en-us-0.15.tar.gz");
+          console.log("Loading base model: vosk-model-small-en-us-0.15.tar.gz");
           updateProgress("Loading base speech recognition model", 0.9);
 
           const baseModelPromise = new Promise((resolve, reject) => {
             try {
               const model = module.createModel(
-                "https://ccoreilly.github.io/vosk-browser/models/vosk-model-small-en-us-0.15.tar.gz",
+                "vosk-model-small-en-us-0.15.tar.gz",
                 "English",
                 "vosk-model-small-en-us-0.15"
               );
@@ -388,13 +296,13 @@
           updateProgress("Base model loaded", 0.95);
 
           // Load speaker model with timeout and retry
-          console.log("Loading speaker model: https://arbdevml.github.io/x-vector/vosk-model-spk-0.4.tar.gz");
+          console.log("Loading speaker model: vosk-model-spk-0.4.tar.gz");
           updateProgress("Loading speaker recognition model", 0.96);
 
           const spkModelPromise = new Promise((resolve, reject) => {
             try {
               const spkModel = module.createSpkModel(
-                "https://arbdevml.github.io/x-vector/vosk-model-spk-0.4.tar.gz",
+                "vosk-model-spk-0.4.tar.gz",
                 "Speaker",
                 "vosk-model-spk-0.4"
               );
@@ -415,7 +323,7 @@
           console.log("Creating recognizer with speaker model...");
           const recognizerPromise = new Promise((resolve, reject) => {
             try {
-              const rec = module.createRecognizerWithSpkModel(baseModel, spkModel, audioContext.sampleRate);
+              const rec = module.createRecognizerWithSpkModel(baseModel, audioContext.sampleRate, spkModel);
               resolve(rec);
             } catch (error) {
               reject(error);
@@ -521,7 +429,7 @@
   <style>
     #console-output {
       width: 90%;
-      height: 400px;
+      height: 300px;
       border: 1px solid #ccc;
       padding: 10px;
       margin: 20px auto;
@@ -583,14 +491,6 @@
       background-color: #0b7dda;
     }
 
-    .versions {
-      margin: 10px 0;
-      padding: 8px;
-      font-size: 16px;
-      border-radius: 4px;
-      border: 1px solid #ccc;
-    }
-
     #progress-bar {
       text-align: center;
       margin: 10px 0;
@@ -612,26 +512,12 @@
   </style>
 </head>
 <body>
-  <div class="controls">
-    <select class="versions select-css">
-      <option value="https://raw.githubusercontent.com/msqr1/Vosklet/refs/heads/main">msqr1/Vosklet@master</option>
-      <option value="https://arbdevml.github.io/x-vector/" selected>msqr1/Vosklet@1.2.1 (from this host)</option>
-      <option value="https://cdn.jsdelivr.net/gh/msqr1/Vosklet@1.2.1">msqr1/Vosklet@1.2.1</option>
-      <option value="https://cdn.jsdelivr.net/gh/msqr1/Vosklet@1.2.0">msqr1/Vosklet@1.2.0</option>
-      <option value="https://cdn.jsdelivr.net/gh/msqr1/Vosklet@1.1.5">msqr1/Vosklet@1.1.5</option>
-      <option value="https://cdn.jsdelivr.net/gh/msqr1/Vosklet@1.1.4">msqr1/Vosklet@1.1.4</option>
-      <option value="https://cdn.jsdelivr.net/gh/msqr1/Vosklet@1.1.3">msqr1/Vosklet@1.1.3</option>
-      <option value="https://cdn.jsdelivr.net/gh/msqr1/Vosklet@1.1.2">msqr1/Vosklet@1.1.2</option>
-      <option value="https://cdn.jsdelivr.net/gh/msqr1/Vosklet@1.1.1">msqr1/Vosklet@1.1.1</option>
-      <option value="https://cdn.jsdelivr.net/gh/msqr1/Vosklet@1.1.0">msqr1/Vosklet@1.1.0</option>
-      <option value="https://cdn.jsdelivr.net/gh/msqr1/Vosklet@1.0.4">msqr1/Vosklet@1.0.4</option>
-      <option value="https://cdn.jsdelivr.net/gh/msqr1/Vosklet@1.0.3">msqr1/Vosklet@1.0.3</option>
-      <option value="https://cdn.jsdelivr.net/gh/msqr1/Vosklet@1.0.2">msqr1/Vosklet@1.0.2</option>
-      <option value="https://cdn.jsdelivr.net/gh/msqr1/Vosklet@1.0.1">msqr1/Vosklet@1.0.1</option>
-      <option value="https://cdn.jsdelivr.net/gh/msqr1/Vosklet@1.0.0">msqr1/Vosklet@1.0.0</option>
-    </select>
+<a class="github-fork-ribbon" href="https://url.to-your.repo" data-ribbon="Fork me on GitHub" title="Fork me on GitHub">Fork me on GitHub</a>
+<h1 style="text-align: center;">X-vector (voice fingerprint) online</h1>
+<p style="text-align: center;">Real-time speaker recognition system using Vosk library</p>
 
-    <button class="control-btn" onclick="start()">Start Speaker Recognition</button>
+  <div class="controls">
+    <button id="start-btn" class="control-btn" onclick="toggleStartPause()">Start Speaker Recognition</button>
     <button class="clear-btn" onclick="clearConsole()">Clear Console</button>
     <button id="copy-btn" class="control-btn" onclick="copyToClipboard()">Copy to Clipboard</button>
   </div>
@@ -647,5 +533,13 @@
   <div id="console-output">
     Console output will appear here...
   </div>
+  <div style="text-align: center; margin-top: 20px; padding: 10px; font-size: 14px; color: #666;">
+  <p>Powered by</p>
+  <p>
+    <a href="https://github.com/msqr1/Vosklet/" target="_blank">https://github.com/msqr1/Vosklet/</a> | 
+    <a href="https://github.com/alphacep/vosk-api/" target="_blank">https://github.com/alphacep/vosk-api/</a>
+  </p>
+  <a href="https://stand-with-ukraine.pp.ua/" class="em-ribbon" style="position: fixed; left:0; top:0; width: 90px; height: 90px; background: url('http://stfalcon.github.io/stopwar/img/stop-war-in-ukraine.png'); z-index: 10000; border: 0;" title="Do something to stop this war! Russians are killing our children and civilians!" target="_blank"></a>
+</div>
 </body>
 </html>
